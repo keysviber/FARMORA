@@ -1,0 +1,85 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signed() { return request.auth != null; }
+    function user() { return get(/databases/$(database)/documents/users/$(request.auth.uid)).data; }
+    function active() { return signed() && user().suspended == false; }
+    function role(r) { return active() && user().role == r; }
+    function own() { return active() && resource.data.ownerId == request.auth.uid; }
+    function validText(s, max) { return s is string && s.size() > 0 && s.size() <= max; }
+    function amount(n) { return n is number && n > 0 && n <= 1000000000; }
+    function categoryAllowed(name) { return validText(name,80) && (exists(/databases/$(database)/documents/categories/$(name)) ? get(/databases/$(database)/documents/categories/$(name)).data.active == true : name in ['Maize and grains','Vegetables','Fruits','Livestock','Poultry','Dairy','Legumes','Oilseeds','Other']); }
+    function currencyAllowed(d) { return d.get('currency','USD') in (exists(/databases/$(database)/documents/platformSettings/marketplace) ? get(/databases/$(database)/documents/platformSettings/marketplace).data.currencies : ['USD']); }
+    function baseRecord(d) { return validText(d.name, 120) && validText(d.location, 500) && d.description is string && d.description.size() <= 4000 && (amount(d.quantity) || d.quantity == 0 && d.status == 'soldOut') && d.unit in ['kg','tonne','litre','crate','head'] && d.images is list && d.images.size() <= 6 && d.updatedAt == request.time; }
+    function validProduct(d) { return d.keys().hasOnly(['ownerId','name','location','description','quantity','unit','images','category','price','minimum','status','createdAt','updatedAt','currency','quality','packaging','harvestDate']) && baseRecord(d) && currencyAllowed(d) && amount(d.price) && amount(d.minimum) && (d.minimum <= d.quantity || d.status == 'soldOut') && categoryAllowed(d.category) && d.status in ['active','paused','soldOut'] && (!('quality' in d) || d.quality is string && d.quality.size() <= 120) && (!('packaging' in d) || d.packaging is string && d.packaging.size() <= 500) && (!('harvestDate' in d) || d.harvestDate is string && d.harvestDate.size() <= 10); }
+    function validRequest(d) { return d.keys().hasOnly(['ownerId','name','location','description','quantity','unit','images','category','price','requiredDate','status','createdAt','updatedAt','currency']) && baseRecord(d) && currencyAllowed(d) && (!('price' in d) || amount(d.price)) && validText(d.requiredDate, 10) && categoryAllowed(d.category) && d.status in ['active','paused']; }
+    function validVehicle(d) { return d.keys().hasOnly(['ownerId','name','location','description','quantity','unit','images','registration','baseFee','rate','cargo','status','createdAt','updatedAt','currency']) && baseRecord(d) && currencyAllowed(d) && validText(d.registration, 40) && validText(d.cargo, 500) && amount(d.baseFee) && amount(d.rate) && d.status in ['active','paused']; }
+    function newRecord(r) { return role(r) && request.resource.data.ownerId == request.auth.uid && request.resource.data.createdAt == request.time; }
+    function editRecord(r) { return role(r) && own() && request.resource.data.ownerId == resource.data.ownerId && request.resource.data.createdAt == resource.data.createdAt && request.resource.data.get('currency','USD') == resource.data.get('currency','USD'); }
+    match /users/{uid} {
+      allow read: if signed() && request.auth.uid == uid;
+      allow create: if signed() && request.auth.uid == uid && request.resource.data.keys().hasOnly(['name','phone','email','role','location','termsVersion','tutorialSeen','verified','suspended','createdAt']) && validText(request.resource.data.name,120) && validText(request.resource.data.phone,40) && request.resource.data.email == request.auth.token.get('email', '') && request.resource.data.role in ['buyer','supplier','logistics'] && validText(request.resource.data.location,500) && request.resource.data.termsVersion == 'draft-1' && request.resource.data.tutorialSeen == false && request.resource.data.verified == false && request.resource.data.suspended == false && request.resource.data.createdAt == request.time;
+      allow update: if active() && request.auth.uid == uid && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['tutorialSeen']) && request.resource.data.tutorialSeen is bool;
+      match /savedProducts/{id} {
+        allow read, delete: if active() && request.auth.uid == uid;
+        allow create, update: if active() && request.auth.uid == uid && request.resource.data.keys().hasOnly(['productId','createdAt']) && request.resource.data.productId == id && request.resource.data.createdAt == request.time;
+      }
+      match /savedSuppliers/{id} {
+        allow read, delete: if active() && request.auth.uid == uid;
+        allow create, update: if role('buyer') && request.auth.uid == uid && request.resource.data.keys().hasOnly(['supplierId','createdAt']) && request.resource.data.supplierId == id && request.resource.data.createdAt == request.time && get(/databases/$(database)/documents/users/$(id)).data.role == 'supplier';
+      }
+      match /addresses/{id} {
+        allow read, delete: if active() && request.auth.uid == uid;
+        allow create, update: if active() && request.auth.uid == uid && request.resource.data.keys().hasOnly(['label','address','contact','phone','updatedAt']) && validText(request.resource.data.label,80) && validText(request.resource.data.address,500) && validText(request.resource.data.contact,120) && validText(request.resource.data.phone,40) && request.resource.data.updatedAt == request.time;
+      }
+      match /devices/{id} {
+        allow read, delete: if active() && request.auth.uid == uid;
+        allow create, update: if active() && request.auth.uid == uid && request.resource.data.keys().hasOnly(['token','updatedAt']) && request.resource.data.token == id && validText(id,4096) && request.resource.data.updatedAt == request.time;
+      }
+      match /settings/notifications {
+        allow read: if active() && request.auth.uid == uid;
+        allow write: if active() && request.auth.uid == uid && request.resource.data.keys().hasOnly(['messages','orders','offers','transport','requests','prices','account']) && (!('messages' in request.resource.data) || request.resource.data.messages is bool) && (!('orders' in request.resource.data) || request.resource.data.orders is bool) && (!('offers' in request.resource.data) || request.resource.data.offers is bool) && (!('transport' in request.resource.data) || request.resource.data.transport is bool) && (!('requests' in request.resource.data) || request.resource.data.requests is bool) && (!('prices' in request.resource.data) || request.resource.data.prices is bool) && (!('account' in request.resource.data) || request.resource.data.account is bool);
+      }
+    }
+    match /publicProfiles/{id} { allow read: if active(); }
+    match /categories/{id} { allow read: if active(); }
+    match /platformSettings/marketplace { allow read: if active(); }
+    match /verificationRequests/{id} { allow read: if active() && id == request.auth.uid; }
+    match /reviews/{id} { allow read: if active(); }
+    match /products/{id} {
+      allow read: if active();
+      allow create: if newRecord('supplier') && validProduct(request.resource.data);
+      allow update: if editRecord('supplier') && request.resource.data.unit == resource.data.unit && validProduct(request.resource.data);
+      allow delete: if own() && role('supplier');
+    }
+    match /buyerRequests/{id} {
+      allow read: if active();
+      allow create: if newRecord('buyer') && validRequest(request.resource.data);
+      allow update: if editRecord('buyer') && resource.data.status != 'fulfilled' && validRequest(request.resource.data);
+      allow delete: if own() && role('buyer');
+    }
+    match /vehicles/{id} {
+      allow read: if active();
+      allow create: if newRecord('logistics') && validVehicle(request.resource.data);
+      allow update: if editRecord('logistics') && validVehicle(request.resource.data);
+      allow delete: if own() && role('logistics');
+    }
+    match /transportRequests/{id} { allow read: if active() && (role('logistics') || resource.data.ownerId == request.auth.uid); }
+    match /orders/{id} { allow read: if active() && request.auth.uid in resource.data.participants; }
+    match /quotations/{id} { allow read: if active() && (resource.data.buyerId == request.auth.uid || resource.data.supplierId == request.auth.uid); }
+    match /transportQuotes/{id} { allow read: if active() && (resource.data.buyerId == request.auth.uid || resource.data.transporterId == request.auth.uid); }
+    match /payments/{id} { allow read: if active() && (resource.data.buyerId == request.auth.uid || resource.data.supplierId == request.auth.uid); }
+    match /conversations/{id} {
+      allow read: if active() && request.auth.uid in resource.data.participants;
+      match /messages/{messageId} { allow read: if active() && request.auth.uid in get(/databases/$(database)/documents/conversations/$(id)).data.participants; }
+    }
+    match /notifications/{id} {
+      allow read: if active() && resource.data.userId == request.auth.uid;
+      allow update: if active() && resource.data.userId == request.auth.uid && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']) && request.resource.data.read == true;
+    }
+    match /{document=**} { allow read, write: if false; }
+  }
+}
+
+
+

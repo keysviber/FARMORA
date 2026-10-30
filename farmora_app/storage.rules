@@ -1,0 +1,30 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function active() { return request.auth != null && firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.suspended == false; }
+    match /verification/{uid}/{file} {
+      allow read: if request.auth != null && (request.auth.token.get('admin', false) == true || (active() && request.auth.uid == uid));
+      allow create: if active() && request.auth.uid == uid && request.resource.size < 5 * 1024 * 1024 && request.resource.contentType == 'image/jpeg';
+    }
+    match /avatars/{uid}/{file} {
+      allow read: if active();
+      allow create: if active() && request.auth.uid == uid && request.resource.size < 5 * 1024 * 1024 && request.resource.contentType == 'image/jpeg';
+    }
+    match /chat/{conversationId}/{uid}/{file} {
+      function conversation() { return firestore.get(/databases/(default)/documents/conversations/$(conversationId)).data; }
+      allow read: if active() && request.auth.uid in conversation().participants;
+      allow create: if active() && request.auth.uid == uid && request.auth.uid in conversation().participants && conversation().get('blockedBy', []).size() == 0 && request.resource.size < 5 * 1024 * 1024 && request.resource.contentType == 'image/jpeg';
+    }
+    match /deliveries/{orderId}/{uid}/{file} {
+      function order() { return firestore.get(/databases/(default)/documents/orders/$(orderId)).data; }
+      allow read: if active() && request.auth.uid in order().participants;
+      allow create: if active() && request.auth.uid == uid && order().status == 'inTransit' && (order().get('transporterId', order().supplierId) == uid) && request.resource.size < 5 * 1024 * 1024 && request.resource.contentType == 'image/jpeg';
+    }
+    match /{collection}/{uid}/{file} {
+      allow read: if active() && collection in ['products','vehicles'];
+      allow create: if active() && request.auth.uid == uid && ((collection == 'products' && firestore.get(/databases/(default)/documents/users/$(uid)).data.role == 'supplier') || (collection == 'vehicles' && firestore.get(/databases/(default)/documents/users/$(uid)).data.role == 'logistics')) && request.resource.size < 5 * 1024 * 1024 && request.resource.contentType == 'image/jpeg';
+      allow delete: if active() && request.auth.uid == uid && collection in ['products','vehicles'];
+    }
+  }
+}
+

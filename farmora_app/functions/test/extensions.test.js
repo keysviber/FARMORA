@@ -1,0 +1,108 @@
+'use strict';
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const {initializeApp, deleteApp} = require('firebase-admin/app');
+const {getFirestore} = require('firebase-admin/firestore');
+const {getAuth} = require('firebase-admin/auth');
+const {initializeTestEnvironment, assertFails, assertSucceeds} = require('@firebase/rules-unit-testing');
+const {ref, uploadBytes, getBytes} = require('firebase/storage');
+const {doc, setDoc, getDoc, serverTimestamp} = require('firebase/firestore');
+const enabled = !!process.env.FIRESTORE_EMULATOR_HOST && !!process.env.FIREBASE_AUTH_EMULATOR_HOST && !!process.env.FIREBASE_STORAGE_EMULATOR_HOST;
+
+test('Private attachments, verification, catalog currencies, saved locations and order conversations enforce access', {skip:!enabled, timeout:240000}, async () => {
+  const app = initializeApp({projectId:'demo-farmora'}, 'extension-tests');
+  const db = getFirestore(app), suffix = Date.now().toString();
+  const env = await initializeTestEnvironment({projectId:'demo-farmora', firestore:{rules:fs.readFileSync('../firestore.rules','utf8')}, storage:{rules:fs.readFileSync('../storage.rules','utf8')}});
+  async function account(role, admin = false) {
+    const email = `${role}${admin ? 'admin' : ''}${suffix}@example.test`, password = 'Testing123!';
+    const endpoint = `http://${process.env.FIREBASE_AUTH_EMULATOR_HOST}/identitytoolkit.googleapis.com/v1/accounts:`;
+    const post = async action => (await fetch(`${endpoint}${action}?key=demo-key`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password,returnSecureToken:true})})).json();
+    let auth = await post('signUp');
+    assert.ok(auth.idToken, JSON.stringify(auth));
+    await db.doc(`users/${auth.localId}`).set({name:role,role,suspended:false,verified:false,location:'Harare'});
+    if (admin) { await getAuth(app).setCustomUserClaims(auth.localId, {admin:true}); auth = await post('signInWithPassword'); }
+    return {uid:auth.localId, token:auth.idToken, context:env.authenticatedContext(auth.localId, admin ? {admin:true} : {})};
+  }
+  async function call(user, name, data) {
+    return (await fetch(`http://127.0.0.1:5001/demo-farmora/africa-south1/${name}`, {method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${user.token}`},body:JSON.stringify({data})})).json();
+  }
+  const good = result => { assert.ok(result.result, JSON.stringify(result)); return result.result; };
+  try {
+    const buyer = await account('buyer'), supplier = await account('supplier'), driver = await account('logistics'), outsider = await account('buyer', true);
+    good(await call(outsider,'configureCurrencies',{currencies:['USD','ZAR'],reason:'Enable rand pricing'}));
+    assert.ok((await call(buyer,'configureCurrencies',{currencies:['USD','ZAR'],reason:'Unauthorized'})).error);
+    good(await call(outsider,'manageCategory',{name:'Seeds',active:true,reason:'Enable seed procurement'}));
+    assert.ok((await call(supplier,'manageCategory',{name:'Unapproved',active:true,reason:'Unauthorized'})).error);
+    const productId = `currency_${suffix}`;
+    const product = {ownerId:supplier.uid,name:'Maize seed',category:'Seeds',currency:'ZAR',price:250,minimum:1,quantity:10,unit:'tonne',description:'Seed',location:'Harare',images:[],status:'active',createdAt:serverTimestamp(),updatedAt:serverTimestamp()};
+    await assertSucceeds(setDoc(doc(supplier.context.firestore(),'products',productId),product));
+    await assertFails(setDoc(doc(supplier.context.firestore(),'products',`${productId}_bad`),{...product,currency:'EUR'}));
+    const currencyOrder = good(await call(buyer,'requestOrder',{productId,quantity:1,destination:'Bulawayo',requestKey:'currency'}));
+    assert.equal((await db.doc(`orders/${currencyOrder.id}`).get()).data().currency,'ZAR');
+    good(await call(supplier,'quoteOrder',{orderId:currencyOrder.id,price:250}));
+    good(await call(buyer,'transitionOrder',{orderId:currencyOrder.id,next:'confirmed'}));
+    good(await call(buyer,'requestTransport',{orderId:currencyOrder.id}));
+    await db.doc(`vehicles/currency_${suffix}`).set({ownerId:driver.uid,status:'active',unit:'tonne',quantity:10,currency:'USD'});
+    assert.ok((await call(driver,'submitTransportQuote',{requestId:currencyOrder.id,amount:50})).error);
+    await db.doc(`vehicles/currency_${suffix}`).update({currency:'ZAR'});
+    const currencyQuote = good(await call(driver,'submitTransportQuote',{requestId:currencyOrder.id,amount:50}));
+    good(await call(buyer,'acceptTransportQuote',{quoteId:currencyQuote.id}));
+    good(await call(buyer,'recordPayment',{orderId:currencyOrder.id,reference:'Manual rand reference'}));
+    assert.equal((await db.doc(`payments/${currencyOrder.id}`).get()).data().currency,'ZAR');
+    assert.equal((await db.doc(`payments/${currencyOrder.id}`).get()).data().amount,300);
+    good(await call(outsider,'adminAction',{action:'rejectPayment',id:currencyOrder.id,reason:'Reference could not be verified'}));
+    good(await call(buyer,'recordPayment',{orderId:currencyOrder.id,reference:'Corrected rand reference'}));
+    assert.equal((await db.collection(`payments/${currencyOrder.id}/attempts`).get()).size,1);
+    assert.equal((await db.doc(`orders/${currencyOrder.id}`).get()).data().paymentStatus,'awaitingVerification');
+    const orderId = `extension_${suffix}`;
+    await db.doc(`orders/${orderId}`).set({name:'Maize',buyerId:buyer.uid,supplierId:supplier.uid,transporterId:driver.uid,participants:[buyer.uid,supplier.uid,driver.uid],status:'ready',paymentStatus:'pending',subtotal:500,transportFee:100});
+    const conversation = good(await call(supplier,'startConversation',{collection:'orders',recordId:orderId,recipientId:driver.uid}));
+    assert.equal(good(await call(driver,'startConversation',{collection:'orders',recordId:orderId,recipientId:supplier.uid})).id, conversation.id);
+    assert.ok((await call(outsider,'startConversation',{collection:'orders',recordId:orderId,recipientId:supplier.uid})).error);
+    assert.ok((await call(buyer,'startConversation',{collection:'orders',recordId:orderId,recipientId:outsider.uid})).error);
+    const storage = supplier.context.storage('demo-farmora.appspot.com');
+    const avatar = `avatars/${supplier.uid}/profile.jpg`;
+    await assertSucceeds(uploadBytes(ref(storage,avatar),new Uint8Array([255,216,255,217]),{contentType:'image/jpeg'}));
+    good(await call(supplier,'setAvatar',{path:avatar}));
+    assert.ok((await call(buyer,'setAvatar',{path:avatar})).error);
+    const path = `chat/${conversation.id}/${supplier.uid}/photo.jpg`;
+    await assertSucceeds(uploadBytes(ref(storage,path),new Uint8Array([255,216,255,217]),{contentType:'image/jpeg'}));
+    await assertFails(uploadBytes(ref(buyer.context.storage('demo-farmora.appspot.com'),`chat/${conversation.id}/${buyer.uid}/forged.jpg`),new Uint8Array([1]),{contentType:'image/jpeg'}));
+    await assertFails(getBytes(ref(outsider.context.storage('demo-farmora.appspot.com'),path)));
+    await assertSucceeds(getBytes(ref(driver.context.storage('demo-farmora.appspot.com'),path)));
+    const args = {conversationId:conversation.id,text:'',imagePath:path,requestKey:'attachment1'};
+    const sent = good(await call(supplier,'sendMessage',args));
+    assert.equal(good(await call(supplier,'sendMessage',args)).id,sent.id);
+    assert.equal((await db.doc(`conversations/${conversation.id}`).get()).data().unread[driver.uid],1);
+    good(await call(driver,'conversationAction',{conversationId:conversation.id,action:'read'}));
+    assert.equal((await db.doc(`conversations/${conversation.id}`).get()).data().unread[driver.uid],0);
+    good(await call(driver,'conversationAction',{conversationId:conversation.id,action:'block'}));
+    assert.ok((await call(supplier,'sendMessage',{conversationId:conversation.id,text:'blocked'})).error);
+    await assertFails(uploadBytes(ref(storage,`chat/${conversation.id}/${supplier.uid}/blocked.jpg`),new Uint8Array([1]),{contentType:'image/jpeg'}));
+    const buyerDb = buyer.context.firestore();
+    const address = {label:'Warehouse',address:'Harare',contact:'Buyer',phone:'+263123456',updatedAt:serverTimestamp()};
+    await assertSucceeds(setDoc(doc(buyerDb,'users',buyer.uid,'addresses','home'),address));
+    await assertFails(getDoc(doc(supplier.context.firestore(),'users',buyer.uid,'addresses','home')));
+    await assertFails(setDoc(doc(buyerDb,'users',buyer.uid,'addresses','bad'),{...address,address:''}));
+    await assertSucceeds(setDoc(doc(buyerDb,'users',buyer.uid,'savedSuppliers',supplier.uid),{supplierId:supplier.uid,createdAt:serverTimestamp()}));
+    await assertFails(setDoc(doc(buyerDb,'users',buyer.uid,'savedSuppliers',driver.uid),{supplierId:driver.uid,createdAt:serverTimestamp()}));
+    await assertSucceeds(getDoc(doc(supplier.context.firestore(),'verificationRequests',supplier.uid)));
+    const document = `verification/${supplier.uid}/permit.jpg`;
+    await assertSucceeds(uploadBytes(ref(storage,document),new Uint8Array([255,216,255,217]),{contentType:'image/jpeg'}));
+    await assertFails(getBytes(ref(buyer.context.storage('demo-farmora.appspot.com'),document)));
+    await assertSucceeds(getBytes(ref(outsider.context.storage('demo-farmora.appspot.com'),document)));
+    good(await call(supplier,'submitVerification',{path:document,description:'Business registration'}));
+    assert.ok((await call(buyer,'submitVerification',{path:document,description:'Not mine'})).error);
+    assert.ok((await call(supplier,'adminAction',{action:'approveVerification',id:supplier.uid,reason:'Self approval'})).error);
+    good(await call(outsider,'adminAction',{action:'approveVerification',id:supplier.uid,reason:'Registration checked'}));
+    assert.equal((await db.doc(`users/${supplier.uid}`).get()).data().verified,true);
+    await db.doc(`orders/${orderId}`).update({status:'deliveryFailed',proofPath:'old-proof'});
+    assert.ok((await call(driver,'adminAction',{action:'retryDelivery',id:orderId,reason:'Retry'})).error);
+    good(await call(outsider,'adminAction',{action:'retryDelivery',id:orderId,reason:'Buyer agreed new time'}));
+    assert.equal((await db.doc(`orders/${orderId}`).get()).data().status,'ready');
+    assert.equal((await db.doc(`orders/${orderId}`).get()).data().proofPath,undefined);
+    await db.doc(`orders/${orderId}`).update({status:'deliveryFailed',paymentStatus:'paid'});
+    assert.ok((await call(outsider,'adminAction',{action:'reassignDelivery',id:orderId,reason:'Reassign'})).error);
+  } finally { await env.cleanup(); await deleteApp(app); }
+});
