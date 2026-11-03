@@ -58,6 +58,24 @@ void main() {
       throwsArgumentError,
     );
   });
+  test('Every way of writing a phone number reaches the same account', () {
+    for (final value in [
+      '0771234567',
+      '077 123 4567',
+      '771234567',
+      '+263 77 123 4567',
+      '+263 (0)77-123-4567',
+      '263771234567',
+      '00263771234567',
+    ]) {
+      expect(normalizePhone(value), '263771234567', reason: value);
+    }
+    expect(normalizePhone('+27 82 123 4567'), '27821234567');
+    for (final value in ['', '12345', 'hello', '077abc4567', '+1234567890123456']) {
+      expect(normalizePhone(value), isNull, reason: value);
+    }
+    expect(phoneLoginEmail('263771234567'), '263771234567@phone.farmora.invalid');
+  });
   test('Unknown account roles cannot silently become buyers', () {
     expect(() => AccountRole.parse('admin'), throwsStateError);
   });

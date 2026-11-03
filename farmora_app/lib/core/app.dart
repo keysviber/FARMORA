@@ -1,14 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import 'config.dart';
 import 'repository.dart';
 import '../authentication/auth_screen.dart';
 import '../marketplace/home.dart';
 import '../shared/widgets.dart';
 
 class FarmoraApp extends StatelessWidget {
-  const FarmoraApp({super.key, this.startupError});
+  const FarmoraApp({super.key, this.firebaseReady = false, this.startupError});
+  final bool firebaseReady;
   final String? startupError;
   @override
   Widget build(BuildContext context) => MaterialApp(
@@ -16,7 +16,7 @@ class FarmoraApp extends StatelessWidget {
     debugShowCheckedModeBanner: false,
     theme: theme(Brightness.light),
     darkTheme: theme(Brightness.dark),
-    home: !FirebaseConfig.configured || startupError != null
+    home: !firebaseReady || startupError != null
         ? Scaffold(
             body: EmptyState(
               'Welcome to Farmora',

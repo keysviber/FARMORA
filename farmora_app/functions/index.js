@@ -15,6 +15,21 @@ function id(value) { const v = text(value, 128); if (!/^[a-zA-Z0-9_-]+$/.test(v)
 function number(value) { if (!positive(value)) fail('Enter a valid positive amount.', 'invalid-argument'); return value; }
 const round = value => Math.round(value * 100) / 100;
 function data(snapshot) { if (!snapshot.exists) fail('Record not found.', 'not-found'); return snapshot.data(); }
+// Mirrors normalizePhone in lib/core/models.dart so a number resolves to the
+// same placeholder login the account was created with.
+function normalizePhone(value) {
+  if (typeof value !== 'string') return null;
+  const raw = value.replace(/[\s().-]/g, '');
+  if (!/^\+?\d+$/.test(raw)) return null;
+  let digits = raw.replace('+', '');
+  if (!raw.startsWith('+')) {
+    if (digits.startsWith('00')) digits = digits.slice(2);
+    else if (digits.startsWith('0')) digits = '263' + digits.slice(1);
+    else if (digits.length === 9) digits = '263' + digits;
+  }
+  if (digits.startsWith('2630')) digits = '263' + digits.slice(4);
+  return digits.length >= 10 && digits.length <= 15 ? digits : null;
+}
 async function actor(request, role) {
   if (!request.auth) fail('Sign in first.', 'unauthenticated');
   const uid = request.auth.uid, profile = data(await db.doc(`users/${uid}`).get());
@@ -328,6 +343,31 @@ exports.submitReview = onCall(options, async request => {
 exports.contactSupport = onCall(options, async request => {
  const a = await actor(request); const ref = db.collection('reports').doc();
  await ref.create({reporterId:a.uid,kind:'support',reason:text(request.data.message,2000),status:'open',createdAt:now()}); return {id:ref.id};
+});
+// Self-serve password reset for phone accounts: the caller supplies the number
+// they signed up with and a new password. This flow does NOT verify ownership
+// of the number, so it is throttled to blunt automated abuse. Enabling SMS
+// verification later is the way to make it safe against account takeover.
+exports.resetPassword = onCall(options, async request => {
+  const number = normalizePhone(request.data && request.data.phone);
+  if (!number) fail('Enter a valid phone number.', 'invalid-argument');
+  const password = request.data.password;
+  if (typeof password !== 'string' || password.length < 8 || password.length > 4096) fail('Use a password of at least 8 characters.', 'invalid-argument');
+  const throttle = db.doc(`passwordResets/${number}`);
+  await db.runTransaction(async tx => {
+    const snap = await tx.get(throttle), windowStart = Date.now() - 3600000;
+    const hits = ((snap.exists && snap.data().attempts) || []).filter(t => t > windowStart);
+    if (hits.length >= 5) fail('Too many reset attempts for this number. Try again later.', 'resource-exhausted');
+    tx.set(throttle, {attempts: [...hits, Date.now()]});
+  });
+  const auth = require('firebase-admin/auth').getAuth();
+  let user;
+  try { user = await auth.getUserByEmail(`${number}@phone.farmora.invalid`); }
+  catch (e) { if (e.code === 'auth/user-not-found') fail('No account uses that phone number.', 'not-found'); throw e; }
+  const profile = await db.doc(`users/${user.uid}`).get();
+  if (profile.exists && profile.data().suspended) fail('This account is unavailable. Contact support.', 'permission-denied');
+  await auth.updateUser(user.uid, {password});
+  return {ok: true};
 });
 exports.deleteAccount = onCall(options, async request => {
  if(!request.auth)fail('Sign in first.','unauthenticated');

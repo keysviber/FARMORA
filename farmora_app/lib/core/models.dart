@@ -33,6 +33,31 @@ const provinces = [
   'Matabeleland South',
   'Midlands',
 ];
+
+/// International digits for a phone number, defaulting to Zimbabwe (+263), so
+/// 0771 234 567 and +263 77 123 4567 are one account. Null if not plausible.
+String? normalizePhone(String input) {
+  final raw = input.replaceAll(RegExp(r'[\s().-]'), '');
+  if (!RegExp(r'^\+?\d+$').hasMatch(raw)) return null;
+  var digits = raw.replaceFirst('+', '');
+  if (raw.startsWith('+')) {
+    // Already international.
+  } else if (digits.startsWith('00')) {
+    digits = digits.substring(2);
+  } else if (digits.startsWith('0')) {
+    digits = '263${digits.substring(1)}';
+  } else if (digits.length == 9) {
+    digits = '263$digits';
+  }
+  if (digits.startsWith('2630')) digits = '263${digits.substring(4)}';
+  return digits.length >= 10 && digits.length <= 15 ? digits : null;
+}
+
+/// Firebase password accounts need an email, so phone accounts use a reserved
+/// address that can never receive mail and is never shown to the user.
+String phoneLoginEmail(String normalizedPhone) =>
+    '$normalizedPhone@phone.farmora.invalid';
+
 double positiveNumber(String input) {
   final value = double.tryParse(input);
   if (value == null || !value.isFinite || value <= 0) {

@@ -9,14 +9,24 @@ import 'core/services.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   String? error;
-  if (FirebaseConfig.configured) {
+  var ready = false;
+  if (FirebaseConfig.available) {
     try {
-      await Firebase.initializeApp(options: FirebaseConfig.options);
+      // Dart-defined options win; otherwise Android reads google-services.json.
+      await Firebase.initializeApp(
+        options: FirebaseConfig.configured ? FirebaseConfig.options : null,
+      );
       await initializeServices();
-    } catch (_) {
+      ready = true;
+    } catch (e) {
+      debugPrint('Firebase startup failed: $e');
       error =
           'Firebase could not start. Check your configuration and connection.';
     }
   }
-  runApp(ProviderScope(child: FarmoraApp(startupError: error)));
+  runApp(
+    ProviderScope(
+      child: FarmoraApp(firebaseReady: ready, startupError: error),
+    ),
+  );
 }

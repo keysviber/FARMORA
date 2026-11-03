@@ -22,7 +22,7 @@ class AuthScreen extends ConsumerStatefulWidget {
 
 class _AuthScreenState extends ConsumerState<AuthScreen> {
   final form = GlobalKey<FormState>();
-  final email = TextEditingController(),
+  final login = TextEditingController(),
       password = TextEditingController(),
       name = TextEditingController(),
       phone = TextEditingController();
@@ -31,7 +31,7 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
   String province = provinces.first;
   @override
   void dispose() {
-    for (final c in [email, password, name, phone]) {
+    for (final c in [login, password, name, phone]) {
       c.dispose();
     }
     super.dispose();
@@ -102,7 +102,21 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                           ),
                         const SizedBox(height: 16),
                         FormFieldInput(name, 'Full name or business name'),
-                        FormFieldInput(phone, 'Phone number'),
+                        TextFormField(
+                          controller: phone,
+                          keyboardType: TextInputType.phone,
+                          autofillHints: const [AutofillHints.telephoneNumber],
+                          decoration: InputDecoration(
+                            labelText: 'Phone number',
+                            helperText: widget.completeProfile
+                                ? null
+                                : 'You will use this number to sign in',
+                          ),
+                          validator: (v) => normalizePhone(v ?? '') == null
+                              ? 'Enter a valid phone number'
+                              : null,
+                        ),
+                        const SizedBox(height: 16),
                         DropdownButtonFormField<String>(
                           initialValue: province,
                           decoration: const InputDecoration(
@@ -119,18 +133,29 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                         const SizedBox(height: 16),
                       ],
                       if (!widget.completeProfile) ...[
-                        TextFormField(
-                          controller: email,
-                          keyboardType: TextInputType.emailAddress,
-                          autofillHints: const [AutofillHints.email],
-                          decoration: const InputDecoration(labelText: 'Email'),
-                          validator: (v) =>
-                              RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$')
-                                  .hasMatch(v?.trim() ?? '')
-                              ? null
-                              : 'Enter a valid email address',
-                        ),
-                        const SizedBox(height: 16),
+                        if (!signup) ...[
+                          // Accounts created before phone sign-up use an email.
+                          TextFormField(
+                            controller: login,
+                            keyboardType: TextInputType.emailAddress,
+                            autofillHints: const [AutofillHints.username],
+                            decoration: const InputDecoration(
+                              labelText: 'Phone number or email',
+                            ),
+                            validator: (v) {
+                              final text = v?.trim() ?? '';
+                              final valid = text.contains('@')
+                                  ? RegExp(
+                                      r'^[^\s@]+@[^\s@]+\.[^\s@]+$',
+                                    ).hasMatch(text)
+                                  : normalizePhone(text) != null;
+                              return valid
+                                  ? null
+                                  : 'Enter your phone number or email';
+                            },
+                          ),
+                          const SizedBox(height: 16),
+                        ],
                         TextFormField(
                           controller: password,
                           obscureText: true,
@@ -167,24 +192,31 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                             );
                           }
                           if (signup) {
-                            if (!widget.completeProfile) {
-                              await repo.auth.createUserWithEmailAndPassword(
-                                email: email.text.trim(),
-                                password: password.text,
-                              );
-                            }
-                            await repo.saveProfile({
+                            final number = normalizePhone(phone.text)!;
+                            final profile = {
                               'name': name.text.trim(),
-                              'phone': phone.text.trim(),
-                              'email': repo.auth.currentUser!.email ?? '',
+                              'phone': '+$number',
                               'role': role.name,
                               'location': province,
                               'termsVersion': 'draft-1',
                               'tutorialSeen': false,
+                            };
+                            if (!widget.completeProfile) {
+                              await repo.auth.createUserWithEmailAndPassword(
+                                email: phoneLoginEmail(number),
+                                password: password.text,
+                              );
+                            }
+                            await repo.saveProfile({
+                              ...profile,
+                              'email': repo.auth.currentUser!.email ?? '',
                             });
                           } else {
+                            final id = login.text.trim();
                             await repo.auth.signInWithEmailAndPassword(
-                              email: email.text.trim(),
+                              email: id.contains('@')
+                                  ? id
+                                  : phoneLoginEmail(normalizePhone(id)!),
                               password: password.text,
                             );
                           }
@@ -242,26 +274,11 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                     ),
                   ),
                   if (!signup)
-                    AsyncAction(
-                      label: 'Reset password',
-                      icon: Icons.lock_reset,
-                      action: () async {
-                        if (!email.text.contains('@')) {
-                          throw Exception('Enter your email address first.');
-                        }
-                        await repo.auth.sendPasswordResetEmail(
-                          email: email.text.trim(),
-                        );
-                        if (context.mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text(
-                                'If an account exists, a reset email will arrive shortly. Check your spam folder.',
-                              ),
-                            ),
-                          );
-                        }
-                      },
+                    TextButton.icon(
+                      icon: const Icon(Icons.lock_reset),
+                      onPressed: () =>
+                          openScreen(context, const ResetPasswordScreen()),
+                      label: const Text('Forgot your password?'),
                     ),
                 ] else
                   TextButton(
@@ -275,6 +292,91 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
       ),
     );
   }
+}
+
+class ResetPasswordScreen extends ConsumerStatefulWidget {
+  const ResetPasswordScreen({super.key});
+  @override
+  ConsumerState<ResetPasswordScreen> createState() =>
+      _ResetPasswordScreenState();
+}
+
+class _ResetPasswordScreenState extends ConsumerState<ResetPasswordScreen> {
+  final form = GlobalKey<FormState>();
+  final phone = TextEditingController(),
+      password = TextEditingController(),
+      confirm = TextEditingController();
+  @override
+  void dispose() {
+    for (final c in [phone, password, confirm]) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Reset password')),
+    body: Form(
+      key: form,
+      child: ListView(
+        padding: const EdgeInsets.all(24),
+        children: [
+          const Text(
+            'Enter the phone number you signed up with and choose a new password.',
+          ),
+          const SizedBox(height: 24),
+          TextFormField(
+            controller: phone,
+            keyboardType: TextInputType.phone,
+            autofillHints: const [AutofillHints.telephoneNumber],
+            decoration: const InputDecoration(labelText: 'Phone number'),
+            validator: (v) => normalizePhone(v ?? '') == null
+                ? 'Enter a valid phone number'
+                : null,
+          ),
+          const SizedBox(height: 16),
+          TextFormField(
+            controller: password,
+            obscureText: true,
+            decoration: const InputDecoration(labelText: 'New password'),
+            validator: (v) =>
+                (v?.length ?? 0) < 8 ? 'Use at least 8 characters' : null,
+          ),
+          const SizedBox(height: 16),
+          TextFormField(
+            controller: confirm,
+            obscureText: true,
+            decoration: const InputDecoration(labelText: 'Confirm new password'),
+            validator: (v) =>
+                v == password.text ? null : 'Passwords do not match',
+          ),
+          const SizedBox(height: 24),
+          AsyncAction(
+            label: 'Set new password',
+            icon: Icons.lock_reset,
+            action: () async {
+              if (!form.currentState!.validate()) return;
+              await ref.read(repositoryProvider).call('resetPassword', {
+                'phone': phone.text.trim(),
+                'password': password.text,
+              });
+              if (context.mounted) {
+                Navigator.pop(context);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text(
+                      'Password updated. Sign in with your new password.',
+                    ),
+                  ),
+                );
+              }
+            },
+          ),
+        ],
+      ),
+    ),
+  );
 }
 
 class PolicyScreen extends StatelessWidget {

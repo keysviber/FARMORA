@@ -78,10 +78,22 @@ class _AsyncActionState extends State<AsyncAction> {
 String friendlyError(Object error) {
   final text = error.toString();
   if (text.contains('invalid-credential')) {
-    return 'The email or password is incorrect.';
+    return 'Those sign-in details are incorrect.';
   }
   if (text.contains('email-already-in-use')) {
-    return 'This email already has an account. Please sign in.';
+    return 'This phone number already has an account. Please sign in.';
+  }
+  if (text.contains('operation-not-allowed')) {
+    return 'Sign-up is not available right now. Please try again later.';
+  }
+  if (text.contains('weak-password')) {
+    return 'Choose a stronger password with at least 8 characters.';
+  }
+  if (text.contains('invalid-email')) {
+    return 'Enter a valid email address.';
+  }
+  if (text.contains('too-many-requests')) {
+    return 'Too many attempts. Please wait a few minutes and try again.';
   }
   if (text.contains('permission-denied')) {
     return 'This action is not permitted. Check your account access.';

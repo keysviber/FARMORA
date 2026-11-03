@@ -1,4 +1,4 @@
-package com.example.farmora_app
+package com.farmora.app
 
 import io.flutter.embedding.android.FlutterActivity
 

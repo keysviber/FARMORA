@@ -50,6 +50,8 @@ app.*.map.json
 # Local service configuration / credentials
 config/firebase.*.json
 !config/firebase.example.json
+android/app/google-services.json
+ios/Runner/GoogleService-Info.plist
 functions/.env*
 !functions/.env.example
 functions/node_modules/
